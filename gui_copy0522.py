@@ -43,6 +43,9 @@ from tkinter import Scale, HORIZONTAL
 from tkinter import Frame, Scale, HORIZONTAL, BOTTOM, TOP, X, BOTH
 import math
 from sklearn.preprocessing import MinMaxScaler
+import concurrent.futures
+from dotenv import load_dotenv
+load_dotenv("./.env", override=True)
 # with open("./Metapunch Data/user_2023_9_6_16_28_49_.json","r",encoding="utf-8") as file:
 #     data=json.load(file)
 # print(data["summary"])
@@ -54,45 +57,144 @@ json_columns=["totalPunchNum","maxPunchSpeed","avgReactionTime","hitRate","avgPu
 boxing_df=pd.DataFrame(columns=json_columns)
 last_filename = None 
 
+CACHE_FILE = "gui_boxing_cache.pkl"
+def _parse_single_file(filename):
+    #多個解析
+    file_path = os.path.join(folder_path, filename)
+    try:
+        if os.path.getsize(file_path) == 0:
+            return None
+        stat = os.stat(file_path)
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        summary = data.get("summary", {})
+        min_rt = summary.get("minReactionTime")
+        avg_rt = summary.get("avgReactionTime")
+        # 過濾異常值（保留原邏輯）
+        if min_rt == 3.5835 or avg_rt == 3.5835:
+            return None
+
+        punch_power = data.get("punchPower", [])
+        max_punch_power = max(punch_power) if punch_power else None
+
+        return {
+            "totalPunchNum":    summary.get("totalPunchNum"),
+            "maxPunchSpeed":    summary.get("maxPunchSpeed"),
+            "avgReactionTime":  avg_rt,
+            "hitRate":          summary.get("hitRate"),
+            "avgPunchSpeed":    summary.get("avgPunchSpeed"),
+            "minReactionTime":  min_rt,
+            "maxPunchPower":    max_punch_power,
+            "score":            summary.get("score"),
+            "_filename":        filename,
+            "_mtime":           stat.st_mtime,
+        }
+    except Exception as e:
+        print(f"[跳過] {filename}: {e}")
+        return None
+
 def load_all_json_files():
-    global boxing_df
-    global max_values
+    global boxing_df, max_values
+
     files = [f for f in os.listdir(folder_path) if f.endswith(".json")]
-    files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)))  # 依據修改時間排序
-    problematic_files = [] 
-    for filename in files:
-        file_path = os.path.join(folder_path, filename)
-        if os.path.getsize(file_path) > 0:  # 檢查檔案大小是否為 0
-            with open(file_path, "r", encoding="utf-8") as file:
-                try:
-                    data = json.load(file)
-                    punch_power = data.get("punchPower", [])
-                    max_punch_power = max(punch_power) if punch_power else None
+    files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)))
+
+    # 讀取快取
+    cached_df = pd.DataFrame()
+    last_cached_mtime = 0.0
+    cached_filenames = set()
+
+    if os.path.exists(CACHE_FILE):
+        try:
+            cached_df = pd.read_pickle(CACHE_FILE)
+            print(f"[快取] 載入 {len(cached_df)} 筆")
+            if "_mtime" in cached_df.columns:
+                last_cached_mtime = cached_df["_mtime"].max()
+            if "_filename" in cached_df.columns:
+                cached_filenames = set(cached_df["_filename"].tolist())
+        except Exception as e:
+            print(f"[快取] 讀取失敗，重新建立: {e}")
+            cached_df = pd.DataFrame()
+
+    # 處理新增/更新的檔案
+    new_files = [
+        f for f in files
+        if f not in cached_filenames or
+           os.path.getmtime(os.path.join(folder_path, f)) > last_cached_mtime
+    ]
+
+    if new_files:
+        print(f"[載入] 新增/更新檔案 {len(new_files)} 個，並行解析中...")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = list(executor.map(_parse_single_file, new_files))
+        new_rows = [r for r in results if r is not None]
+        if new_rows:
+            new_df = pd.DataFrame(new_rows)
+            combined = pd.concat([cached_df, new_df], ignore_index=True)
+            # 去除重複（以 _filename 為準，保留最新）
+            if "_filename" in combined.columns:
+                combined = combined.drop_duplicates(subset="_filename", keep="last")
+            combined.to_pickle(CACHE_FILE)
+            print(f"[快取] 已更新儲存")
+            cached_df = combined
+    else:
+        print(f"[快取] 無新增檔案，直接使用快取")
+
+    # ── 整理 boxing_df（移除內部欄位）────────────────────
+    internal_cols = [c for c in cached_df.columns if c.startswith("_")]
+    boxing_df = cached_df.drop(columns=internal_cols, errors="ignore").copy()
+
+    # 套用原本的過濾條件
+    boxing_df = boxing_df[
+        (boxing_df["totalPunchNum"] >= 0) &
+        (boxing_df["maxPunchSpeed"] <= 10) &
+        (boxing_df["maxPunchSpeed"] > 0) &
+        (boxing_df["maxPunchPower"] <= 1000)
+    ]
+    boxing_df = boxing_df.reset_index(drop=True)
+    max_values = boxing_df[json_columns].apply(max)
+    print(f"[完成] 共 {len(boxing_df)} 筆有效資料")
+    print(f"max_values:\n{max_values}")
+# def load_all_json_files():
+#     global boxing_df
+#     global max_values
+#     files = [f for f in os.listdir(folder_path) if f.endswith(".json")]
+#     files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)))  # 依據修改時間排序
+#     problematic_files = [] 
+#     for filename in files:
+#         file_path = os.path.join(folder_path, filename)
+#         if os.path.getsize(file_path) > 0:  # 檢查檔案大小是否為 0
+#             with open(file_path, "r", encoding="utf-8") as file:
+#                 try:
+#                     data = json.load(file)
+#                     punch_power = data.get("punchPower", [])
+#                     max_punch_power = max(punch_power) if punch_power else None
 
 
-                    min_reaction_time = data["summary"].get("minReactionTime")
-                    avg_reaction_time = data["summary"].get("avgReactionTime")
-                    if min_reaction_time == 3.5835 or avg_reaction_time == 3.5835:
-                        problematic_files.append(file_path)
+#                     min_reaction_time = data["summary"].get("minReactionTime")
+#                     avg_reaction_time = data["summary"].get("avgReactionTime")
+#                     if min_reaction_time == 3.5835 or avg_reaction_time == 3.5835:
+#                         problematic_files.append(file_path)
                 
-                    temp_row = {
-                        "totalPunchNum": [data["summary"].get("totalPunchNum")],
-                        "maxPunchSpeed": [data["summary"].get("maxPunchSpeed")],
-                        "avgReactionTime": [data["summary"].get("avgReactionTime")],
-                        "hitRate": [data["summary"].get("hitRate")],
-                        "avgPunchSpeed": [data["summary"].get("avgPunchSpeed")],
-                        "minReactionTime": [data["summary"].get("minReactionTime")],
-                        "maxPunchPower": [max_punch_power],
-                        "score": [data["summary"].get("score")],
-                    }
+#                     temp_row = {
+#                         "totalPunchNum": [data["summary"].get("totalPunchNum")],
+#                         "maxPunchSpeed": [data["summary"].get("maxPunchSpeed")],
+#                         "avgReactionTime": [data["summary"].get("avgReactionTime")],
+#                         "hitRate": [data["summary"].get("hitRate")],
+#                         "avgPunchSpeed": [data["summary"].get("avgPunchSpeed")],
+#                         "minReactionTime": [data["summary"].get("minReactionTime")],
+#                         "maxPunchPower": [max_punch_power],
+#                         "score": [data["summary"].get("score")],
+#                     }
                     
-                    boxing_df = pd.concat([boxing_df, pd.DataFrame(temp_row)], ignore_index=True)
-                except json.JSONDecodeError as e:
-                    print(f"JSONDecodeError in file '{filename}' at line {e.lineno}, column {e.colno}: {e.msg}")
-                    print(f"File path: {file_path}")
-                    file.seek(0)
-                    print(f"File content preview:\n{file.read(20)}") 
-    boxing_df=boxing_df[(boxing_df['totalPunchNum'] >= 0) & (boxing_df['maxPunchSpeed'] <=10) & (boxing_df['maxPunchSpeed'] >0) &(boxing_df['maxPunchPower'] <=1000)] 
+#                     boxing_df = pd.concat([boxing_df, pd.DataFrame(temp_row)], ignore_index=True)
+#                 except json.JSONDecodeError as e:
+#                     print(f"JSONDecodeError in file '{filename}' at line {e.lineno}, column {e.colno}: {e.msg}")
+#                     print(f"File path: {file_path}")
+#                     file.seek(0)
+#                     print(f"File content preview:\n{file.read(20)}") 
+#     boxing_df=boxing_df[(boxing_df['totalPunchNum'] >= 0) & (boxing_df['maxPunchSpeed'] <=10) & (boxing_df['maxPunchSpeed'] >0) &(boxing_df['maxPunchPower'] <=1000)] 
     max_values=boxing_df[json_columns].apply(max)
     print(f"max_values:\n{max_values}")
 
@@ -1524,8 +1626,12 @@ class App(tk.Tk):
             
             
             
-            fig=plt.figure()
-            ax=fig.add_subplot(111,projection='3d')
+            # fig=plt.figure() #舊的
+            # ax=fig.add_subplot(111,projection='3d')
+            if hasattr(self, "fig_show_all") and self.fig_show_all:
+                plt.close(self.fig_show_all)
+            self.fig_show_all = plt.figure()
+            ax = self.fig_show_all.add_subplot(111, projection='3d')
 
             ax.scatter(r_xavg,r_zavg,r_yavg,color="darkturquoise",s=30,label="Right hand")
             ax.scatter(l_xavg,l_zavg,l_yavg,color="lime",s=30,label="Left hand")
@@ -1563,7 +1669,7 @@ class App(tk.Tk):
             ax.set_zlabel('Y Axis')
             ax.legend(loc='upper left', bbox_to_anchor=(0.7, 1), borderaxespad=0,borderpad=0.3,labelspacing=0.2,    fontsize='small')
             ax.view_init(elev=37,azim=-64)#拿來調整最後圖的旋轉
-            self.canvas_all_position=FigureCanvasTkAgg(fig, master=self.canvas)
+            self.canvas_all_position=FigureCanvasTkAgg(self.fig_show_all, master=self.canvas)
             self.canvas_all_position.draw()
             self.window_all_position=self.canvas.create_window(375, 390, anchor="nw", window=self.canvas_all_position.get_tk_widget(), width=365, height=350)
             
@@ -1819,8 +1925,12 @@ class App(tk.Tk):
             
             
             
-            fig=plt.figure()
-            ax=fig.add_subplot(111,projection='3d')
+            # fig=plt.figure() #舊得
+            # ax=fig.add_subplot(111,projection='3d')
+            if hasattr(self, "fig_punch_position") and self.fig_punch_position:
+                plt.close(self.fig_punch_position)
+            self.fig_punch_position = plt.figure()
+            ax = self.fig_punch_position.add_subplot(111, projection='3d')
 
             ax.scatter(r_xavg,r_zavg,r_yavg,color="blue",s=20,label="Right hand")
             ax.scatter(l_xavg,l_zavg,l_yavg,color="green",s=20,label="Left hand")
@@ -1890,7 +2000,7 @@ class App(tk.Tk):
             # ax.set_aspect('equal')#把坐標軸大小都調整一樣
             
             plt.savefig("Punch position.png")
-            self.canvas_punch_Logs = FigureCanvasTkAgg(fig, master=self.canvas)
+            self.canvas_punch_Logs = FigureCanvasTkAgg(self.fig_punch_position, master=self.canvas)
             self.canvas_punch_Logs.draw()
             self.window_punch_Logs=self.canvas.create_window(1105, 390, anchor="nw", window=self.canvas_punch_Logs.get_tk_widget(), width=365, height=350)
 
@@ -1980,7 +2090,10 @@ class App(tk.Tk):
             print(f"time_data{time_data}")
             totaltime =math.ceil(time_data[-1])+5
             # fig,(ax1,ax2,ax3,ax4,ax5,ax6)=plt.subplots(1,6, figsize=(16, 3))
-            fig, axs = plt.subplots(1, 6, figsize=(16, 3), width_ratios=[2, 0.5, 2, 0.5, 2, 0.5])
+            # fig, axs = plt.subplots(1, 6, figsize=(16, 3), width_ratios=[2, 0.5, 2, 0.5, 2, 0.5]) #原本
+            if hasattr(self, "fig_punch_reaction") and self.fig_punch_reaction:
+                plt.close(self.fig_punch_reaction)
+            self.fig_punch_reaction, axs = plt.subplots(1, 6, figsize=(16, 3), width_ratios=[2, 0.5, 2, 0.5, 2, 0.5])
             ax1, ax2, ax3, ax4, ax5, ax6 = axs
             
             # ax1.plot(speed_data,color='skyblue',linewidth=2, markersize=6)
@@ -2057,8 +2170,8 @@ class App(tk.Tk):
 
                 ax.set_xlim(new_xlim)
                 ax.set_ylim(new_ylim)
-                fig.canvas.draw_idle()
-                fig.canvas.flush_events()
+                self.fig_punch_reaction.canvas.draw_idle()
+                self.fig_punch_reaction.canvas.flush_events()
 
             # Drag function
             def pan(event):
@@ -2081,21 +2194,21 @@ class App(tk.Tk):
                         dy = pan.dy
                         ax.set_xlim([xlim[0] + dx, xlim[1] + dx])
                         ax.set_ylim([max(0, ylim[0] + dy), ylim[1] + dy])
-                        fig.canvas.draw_idle()
+                        self.fig_punch_reaction.canvas.draw_idle()
                     pan.start = None
                     pan.dragging = False
                     pan.dx = 0
                     pan.dy = 0
 
-            fig.canvas.mpl_connect('scroll_event', zoom)
-            fig.canvas.mpl_connect('button_press_event', pan)
-            fig.canvas.mpl_connect('motion_notify_event', pan)
-            fig.canvas.mpl_connect('button_release_event', pan)
+            self.fig_punch_reaction.canvas.mpl_connect('scroll_event', zoom)
+            self.fig_punch_reaction.canvas.mpl_connect('button_press_event', pan)
+            self.fig_punch_reaction.canvas.mpl_connect('motion_notify_event', pan)
+            self.fig_punch_reaction.canvas.mpl_connect('button_release_event', pan)
 
             plt.tight_layout()
             plt.savefig("show_plot_punch_and_reaction.png")
             
-            self.canvas_three_type_Logs= FigureCanvasTkAgg(fig,master=self.canvas)
+            self.canvas_three_type_Logs= FigureCanvasTkAgg(self.fig_punch_reaction,master=self.canvas)
             self.canvas_three_type_Logs.draw()
             self.window_three_type_Logs=self.canvas.create_window(10, 95, anchor="nw", window=self.canvas_three_type_Logs.get_tk_widget(), width=1460, height=300)
             
@@ -2122,21 +2235,21 @@ class App(tk.Tk):
                 adjusted_scale_value = max(scale_value, 0.1)  
                 ax1.set_ylim(0, adjusted_scale_value)  
                 ax2.set_ylim(0, adjusted_scale_value)                
-                fig.canvas.draw_idle()
+                self.fig_punch_reaction.canvas.draw_idle()
 
             def set_scale_PunchPower(val):
                 scale_value = float(val)
                 adjusted_scale_value = max(scale_value, 0.1)  
                 ax3.set_ylim(0, adjusted_scale_value)  
                 ax4.set_ylim(0, adjusted_scale_value)                  
-                fig.canvas.draw_idle()
+                self.fig_punch_reaction.canvas.draw_idle()
                 
             def set_scale_Reactiontime(val):
                 scale_value = float(val)
                 adjusted_scale_value = max(scale_value, 0.1)   
                 ax5.set_ylim(0, adjusted_scale_value)  
                 ax6.set_ylim(0, adjusted_scale_value)                  
-                fig.canvas.draw_idle()
+                self.fig_punch_reaction.canvas.draw_idle()
                 
             self.scale_PunchSpeed.config(command=set_scale_PunchSpeed)
             self.scale_PunchPower.config(command=set_scale_PunchPower)
@@ -2153,12 +2266,15 @@ class App(tk.Tk):
             power_data=data.get("punchPower",[])
             reaction_data=data.get("reactionTime",[])
             self.punchnumber=len(reaction_data)
-            print(f"reactiondata{reaction_data}")
+            # print(f"reactiondata{reaction_data}")#測試而已
             time_data=data.get("punchTimeCode",[])
-            print(f"time_data{time_data}")
+            # print(f"time_data{time_data}") #測試而已
             totaltime =math.ceil(time_data[-1])+5
             # fig,(ax1,ax2,ax3,ax4,ax5,ax6)=plt.subplots(1,6, figsize=(16, 3))
-            fig, axs = plt.subplots(1, 2, figsize=(5, 3), width_ratios=[2, 0.5])
+            # fig, axs = plt.subplots(1, 2, figsize=(5, 3), width_ratios=[2, 0.5]) #舊的
+            if hasattr(self, "fig_boxing_scatter") and self.fig_boxing_scatter:
+                plt.close(self.fig_boxing_scatter)
+            self.fig_boxing_scatter, axs = plt.subplots(1, 2, figsize=(5, 3), width_ratios=[2, 0.5])
             ax1, ax2= axs
             
             # ax1.plot(speed_data,color='skyblue',linewidth=2, markersize=6)
@@ -2202,8 +2318,8 @@ class App(tk.Tk):
 
                 ax.set_xlim(new_xlim)
                 ax.set_ylim(new_ylim)
-                fig.canvas.draw_idle()
-                fig.canvas.flush_events()
+                self.fig_boxing_scatter.canvas.draw_idle()
+                self.fig_boxing_scatter.canvas.flush_events()
 
             # Drag function
             def pan(event):
@@ -2226,21 +2342,21 @@ class App(tk.Tk):
                         dy = pan.dy
                         ax.set_xlim([xlim[0] + dx, xlim[1] + dx])
                         ax.set_ylim([max(0, ylim[0] + dy), ylim[1] + dy])
-                        fig.canvas.draw_idle()
+                        self.fig_boxing_scatter.canvas.draw_idle()
                     pan.start = None
                     pan.dragging = False
                     pan.dx = 0
                     pan.dy = 0
 
-            fig.canvas.mpl_connect('scroll_event', zoom)
-            fig.canvas.mpl_connect('button_press_event', pan)
-            fig.canvas.mpl_connect('motion_notify_event', pan)
-            fig.canvas.mpl_connect('button_release_event', pan)
+            self.fig_boxing_scatter.canvas.mpl_connect('scroll_event', zoom)
+            self.fig_boxing_scatter.canvas.mpl_connect('button_press_event', pan)
+            self.fig_boxing_scatter.canvas.mpl_connect('motion_notify_event', pan)
+            self.fig_boxing_scatter.canvas.mpl_connect('button_release_event', pan)
 
             plt.tight_layout()
             plt.savefig("show_plot_punch_and_reaction.png")
             
-            self.canvas_BoxingStance_Logs= FigureCanvasTkAgg(fig,master=self.canvas)#放整張照片的
+            self.canvas_BoxingStance_Logs= FigureCanvasTkAgg(self.fig_boxing_scatter,master=self.canvas)#放整張照片的
             self.canvas_BoxingStance_Logs.draw()
             self.window_BoxingStance_Logs=self.canvas.create_window(1105, 390, anchor="nw", window=self.canvas_BoxingStance_Logs.get_tk_widget(), width=380, height=350)
             
@@ -2258,7 +2374,7 @@ class App(tk.Tk):
                 adjusted_scale_value = max(scale_value, 0.1)  
                 ax1.set_ylim(0, adjusted_scale_value)  
                 ax2.set_ylim(0, adjusted_scale_value)                
-                fig.canvas.draw_idle()
+                self.fig_boxing_scatter.canvas.draw_idle()
 
             self.scale_BoxingStance.config(command=set_scale_scale_BoxingStance)
 
@@ -2276,6 +2392,13 @@ class App(tk.Tk):
         
     def clear_canvas_content(self):
         """Clear all content on the canvas and reset stored variables."""
+        for fig_attr in ["fig_punch_reaction", "fig_boxing_scatter", "fig_boxingstance",
+                  "fig_all_position", "fig_animation", "fig_punch_position",
+                  "fig_show_all", "fig_radar"]:
+            if hasattr(self, fig_attr) and getattr(self, fig_attr) is not None:
+                plt.close(getattr(self, fig_attr))
+                setattr(self, fig_attr, None)
+                # print(f"Closed figure: {fig_attr}")
         if hasattr(self,"test_label") and self.test_label:
             self.test_label.destroy()
             self.test_label=None
@@ -2581,8 +2704,12 @@ class App(tk.Tk):
                 z_playerPos_coords = [point["z"] for point in playerPosLogs]
 
                 # 創建圖表
-                fig = plt.figure()
-                ax = fig.add_subplot(111, projection='3d')
+                # fig = plt.figure()   #原本
+                if hasattr(self, "fig_animation") and self.fig_animation:
+                    plt.close(self.fig_animation)
+                self.fig_animation = plt.figure()
+                # ax = fig.add_subplot(111, projection='3d')
+                ax = self.fig_animation.add_subplot(111, projection='3d')
                 scatter_r = ax.scatter([], [], [], color="blue", s=20, label="Right hand")
                 scatter_l = ax.scatter([], [], [], color="green", s=20, label="Left hand")
                 scatter_head = ax.scatter([],[],[],color="purple", s=20, label="Head position")
@@ -2674,7 +2801,7 @@ class App(tk.Tk):
 
                 # 動畫
                 # ani = FuncAnimation(fig, update(frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=100, blit=False)
-                self.ani = FuncAnimation(fig, partial(update,frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=200, blit=False)#改了ani
+                self.ani = FuncAnimation(self.fig_animation, partial(update,frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=200, blit=False)#改了ani
                 self.initialize_control_frame() 
 
 
@@ -2686,7 +2813,7 @@ class App(tk.Tk):
                     frame_delays.clear()
                     # self.ani = FuncAnimation(fig, partial(update, frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=(round(0.85 ** int(speed_value)*100)), blit=False)
                     # self.ani = FuncAnimation(fig, partial(update, frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=(200-((int(speed_value)-1)*40)), blit=False)  
-                    self.ani = FuncAnimation(fig, partial(update, frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=(20-((int(speed_value)-1)*2)), blit=False)    
+                    self.ani = FuncAnimation(self.fig_animation, partial(update, frame_limit_value=frame_limit_value), frames=np.arange(0, len(x_RHandPos_coords)), interval=(20-((int(speed_value)-1)*2)), blit=False)    
                     print(f"interval={(200-((int(speed_value)-1)*40))}")
                     self.canvas_animation.draw()   
                     
@@ -2718,7 +2845,7 @@ class App(tk.Tk):
                 self.canvas.create_window(10, 700, anchor="nw", window=self.control_frame)
 
                 # 使用 FigureCanvasTkAgg 將圖表嵌入到 Tkinter
-                self.canvas_animation = FigureCanvasTkAgg(fig, master=self.canvas)
+                self.canvas_animation = FigureCanvasTkAgg(self.fig_animation, master=self.canvas)
                 self.canvas_animation.draw()
                 # self.window_animation=self.canvas.create_window(10, 390, anchor="nw", window=self.canvas_animation.get_tk_widget(), width=483, height=350)
 
@@ -2879,8 +3006,12 @@ class App(tk.Tk):
 
         self.initialize_guardposition_frame()
         # 初始化繪圖
-        self.fig = plt.figure()
-        self.ax = self.fig.add_subplot(111, projection='3d')
+        # self.fig = plt.figure()
+        # self.ax = self.fig.add_subplot(111, projection='3d') 舊的
+        if hasattr(self, "fig_boxingstance") and self.fig_boxingstance:
+            plt.close(self.fig_boxingstance)
+        self.fig_boxingstance = plt.figure()
+        self.ax = self.fig_boxingstance.add_subplot(111, projection='3d')
         self.update_plot_and_labels(0)  # 顯示第一拳的數據
 
     def update_plot_and_labels(self, punch_number):
@@ -2904,7 +3035,7 @@ class App(tk.Tk):
         # self.canvas.draw_idle()
 
 
-        self.canvas_newboxstance = FigureCanvasTkAgg(self.fig, master=self.canvas)
+        self.canvas_newboxstance = FigureCanvasTkAgg(self.fig_boxingstance, master=self.canvas)
         self.canvas_newboxstance.draw()
         if hasattr(self, "window_newboxstance"):
             self.canvas.delete(self.window_newboxstance)  # 刪除舊的嵌入窗口
@@ -3084,8 +3215,12 @@ class App(tk.Tk):
                 new_x = player_xavg[max_index]
                 new_y = player_yavg[max_index]
 
-                fig=plt.figure()
-                ax=fig.add_subplot(111,projection='3d')
+                # fig=plt.figure()
+                # ax=fig.add_subplot(111,projection='3d')  #舊的
+                if hasattr(self, "fig_all_position") and self.fig_all_position:
+                    plt.close(self.fig_all_position)
+                self.fig_all_position = plt.figure()
+                ax = self.fig_all_position.add_subplot(111, projection='3d')
 
                 print(f"Before r_zavg: {r_zavg}")
                 print(f"Before l_zavg: {l_zavg}")
@@ -3172,7 +3307,7 @@ class App(tk.Tk):
                         filtered_r_xavg, filtered_r_yavg, filtered_r_zavg,
                         after_max_player_z, new_z, new_x, new_y
                     )
-                    fig.canvas.draw_idle()
+                    self.fig_all_position.canvas.draw_idle()
                     print(f"The value updated to: {max_number}")             
                     
                     
@@ -3320,8 +3455,9 @@ class App(tk.Tk):
                 return features
 
     def send_data_to_gpt(self, normalized_features):
-        api_key = "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"  # 替換為自己的 GPT API 金鑰
-        openai.api_key = api_key
+        # api_key = ""  # 替換為自己的 GPT API 金鑰
+        # openai.api_key = api_key
+        openai.api_key = os.getenv("OPENAI_API_KEY")
         normalized_features_serializable = {
             key: (value.tolist() if isinstance(value, np.ndarray) else value)
             for key, value in normalized_features.items()
@@ -3418,8 +3554,11 @@ class App(tk.Tk):
         title2 = os.path.basename(self.compare_file_paths[1])
 
         # Larger figure size
-        fig = plt.figure(figsize=(10, 10))
-        ax = fig.add_subplot(111, polar=True)
+        # fig = plt.figure(figsize=(10, 10)) 舊的
+        if hasattr(self, "fig_radar") and self.fig_radar:
+            plt.close(self.fig_radar)
+        self.fig_radar = plt.figure(figsize=(10, 10))
+        ax = self.fig_radar.add_subplot(111, polar=True)
 
         angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
         angles += angles[:1]
@@ -3441,12 +3580,12 @@ class App(tk.Tk):
         ax.set_xticklabels(categories, size=11, fontweight='bold')
         ax.set_ylim(0, 110) 
         
-        # 將外圍的類別名稱(如 hitRate) 往外圍推 25 像素，留空間給數字
+        # 將外圍的類別名稱往外像素，留空間給數字
         ax.tick_params(pad=25) 
 
         # 3. 解決數字重疊：同半徑，左右錯開角度
         for i, angle in enumerate(angles[:-1]):
-            r_distance = 112 # 將數字統一放在半徑 112 的位置 (剛好在圖表邊緣)
+            r_distance = 112 # 將數字統一放在半徑 112 的位置 
             angle_offset = 0.08 # 設定角度偏移量
 
             # 繪製 User 1 (藍色) - 角度減一點，稍微靠左
@@ -3463,7 +3602,7 @@ class App(tk.Tk):
         plt.title("Performance Comparison Radar Chart", pad=35, fontsize=15, fontweight='bold')
 
         # 更新 Canvas
-        self.canvas_radarchart = FigureCanvasTkAgg(fig, master=self.canvas)
+        self.canvas_radarchart = FigureCanvasTkAgg(self.fig_radar, master=self.canvas)
         self.canvas_radarchart.draw()
         chart_w, chart_h = 1000, 800
         x_pos = (self.window_width - chart_w) // 2
