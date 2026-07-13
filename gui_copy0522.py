@@ -81,10 +81,10 @@ def _parse_single_file(filename):
         return {
             "totalPunchNum":    summary.get("totalPunchNum"),
             "maxPunchSpeed":    summary.get("maxPunchSpeed"),
-            "avgReactionTime":  avg_rt,
+            "avgReactionTime":  summary.get("avgReactionTime"),
             "hitRate":          summary.get("hitRate"),
             "avgPunchSpeed":    summary.get("avgPunchSpeed"),
-            "minReactionTime":  min_rt,
+            "minReactionTime":  summary.get("minReactionTime"),
             "maxPunchPower":    max_punch_power,
             "score":            summary.get("score"),
             "_filename":        filename,

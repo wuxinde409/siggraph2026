@@ -1034,15 +1034,15 @@ def generate_round_summary_and_voice(file_path, style):
     <FINAL_SCRIPT>
     [Provide the final spoken script here, based on the refinements from ITERATION_2 and CRITIQUE_2.]
     {prompt_lang_instruction}
-    MUST be under 150 words. NO markdown, NO emojis.
+    MUST be under 100 words. NO markdown, NO emojis.
     </FINAL_SCRIPT>
     """
     
     try:
         model = genai.GenerativeModel("gemini-3.1-flash-lite-preview")
         generation_config = genai.types.GenerationConfig(
-            temperature=0.3, 
-            max_output_tokens=600, 
+            temperature=0.85, 
+            max_output_tokens=1200, 
         )
         response = model.generate_content(prompt, generation_config=generation_config)
         full_text = response.text.strip()
