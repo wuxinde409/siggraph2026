@@ -45,7 +45,7 @@ STYLE_WEIGHT_MAP = {}
 PREVIOUS_DATA = None
 CURRENT_USER_STYLE = None # 預設風格
 FILE_PROCESS_COUNT = 0  # 計算處理過的檔案數量
-MAX_FILES_BEFORE_RESET = 6  #看你幾秒一組就 30/x= MAX_FILES_BEFORE_RESET
+MAX_FILES_BEFORE_RESET = 2  #看你幾秒一組就 30/x= MAX_FILES_BEFORE_RESET
 stop_monitoring = False
 ROUND_PUNCH_ACCUMULATOR = 0
 
@@ -399,6 +399,34 @@ def init_style_weights(all_data): #權重處裡
         for name, val in STYLE_WEIGHT_MAP[target]["scoring"]: 
             print(f"{name:<30} (權重: {val:.4f})")
 previousboxstyle_totalpunchnum=0
+ABSOLUTE_BENCHMARKS = {  #新增基準判斷
+    "totalPunchNum":   {"low": 40,   "high": 130},
+    "maxPunchSpeed":   {"low": 1.2,  "high": 2.8},
+    "avgPunchSpeed":   {"low": 0.6,  "high": 1.5},
+    "hitRate":         {"low": 40,   "high": 70},
+    "avgReactionTime": {"low": 0.8,  "high": 0.35},   # 越低越好
+    "minReactionTime": {"low": 0.5,  "high": 0.15},   # 越低越好
+    "maxPunchPower":   {"low": 50,   "high": 200},
+    "avgPunchPower":   {"low": 30,   "high": 120},
+    "punchspeed_consistency": {"low": 0.5, "high": 0.75},
+}
+
+REVERSE_METRICS = {"avgReactionTime", "minReactionTime"}  # 越低越好
+
+def label_from_benchmark(key, value):
+    bench = ABSOLUTE_BENCHMARKS.get(key)
+    if bench is None:
+        return "recorded"
+    low, high = bench["low"], bench["high"]
+    if key in REVERSE_METRICS:
+        if value <= high:  return "excellent"
+        elif value <= low: return "moderate"
+        else:              return "needs_improvement"
+    else:
+        if value >= high:  return "excellent"
+        elif value >= low: return "moderate"
+        else:              return "needs_improvement"
+
 # 送資料及正規劃給gpt
 def calculate_detailed_stats_for_gpt(file_path):
     
@@ -586,31 +614,61 @@ def prepare_data_for_gpt(file_path): #第二種把資料分開的
         else:
             formative_analysis[f"{new_key}_intent_score"] = 0
             formative_analysis[f"{new_key}_consistency"] = 0
-        # arr = np.array(raw_data.get(key, []))
-        # if len(arr) > 0: #第一種normalize
-        #     norm = scaler.fit_transform(arr.reshape(-1, 1)).flatten()
-        #     formative_normalized[new_key] = norm.tolist()
-        #     # 額外加入平均值，幫助 GPT 快速抓到特徵
-        #     formative_normalized[f"{new_key}_mean"] = round(float(np.mean(norm)), 4)
-        
-        # if len(arr) > 1: # 至少需要兩筆資料來計算標準#第一種normalize
-        #     norm = scaler.fit_transform(arr.reshape(-1, 1)).flatten()
-        #     mean_val = np.mean(norm)
-        #     std_val = np.std(norm)
-        #     # 計算變異係數 CV = 標準差 / 平均值
-        #     cv = std_val / mean_val if mean_val > 0 else 1
-        #     # 一致性 C = 1 - CV (限制在 0-1 之間)
-        #     consistency = max(0, min(1, 1 - cv))
             
-        #     formative_analysis[f"{new_key}_intent"] = round(float(mean_val * 100), 2)
-        #     formative_analysis[f"{new_key}_consistency"] = round(float(consistency), 4)
-        # else:
-        #     formative_analysis[f"{new_key}_intent"] = 0
-        #     formative_analysis[f"{new_key}_consistency"] = 0
-    return {    # 最終傳出的結構
-        "summary_data": percentage_series,# 這是 PR 值
-        "formative_data": formative_analysis# 這是 Z-Score 轉換分 + 一致性
-    }
+    summary_cols = ["totalPunchNum", "maxPunchSpeed", "avgPunchSpeed",
+                    "hitRate", "minReactionTime", "avgReactionTime",
+                    "maxPunchPower", "avgPunchPower"]
+
+    summary_profile = {}
+    for col in summary_cols:
+        val = rf_feats.get(col)
+        if val is not None:
+            summary_profile[col] = {
+                "value": round(float(val), 4),
+                "level": label_from_benchmark(col, val)
+            }
+
+    # formative：intent_score 轉 level，consistency 轉文字
+    formative_profile = {}
+    for k, v in formative_analysis.items():
+        if "consistency" in k:
+            formative_profile[k] = {
+                "value": round(float(v), 4),
+                "level": "consistent" if v >= 0.7 else "inconsistent"
+            }
+        else:
+            # intent_score 以 50 為中線（Z-score 轉換中心）
+            formative_profile[k] = {
+                "value": round(float(v), 2),
+                "level": "strong" if v >= 60 else ("moderate" if v >= 40 else "weak")
+            }
+
+    # 加入三段速度趨勢（early/mid/late），讓 LLM 判斷體力衰退
+    raw_punchspeed = np.array(raw_data.get("punchSpeed", []))
+    if len(raw_punchspeed) >= 3:
+        third = len(raw_punchspeed) // 3
+        early_avg = round(float(np.mean(raw_punchspeed[:third])), 4)
+        mid_avg   = round(float(np.mean(raw_punchspeed[third:third*2])), 4)
+        late_avg  = round(float(np.mean(raw_punchspeed[third*2:])), 4)
+    else:
+        early_avg = mid_avg = late_avg = 0.0
+    # return {    # 原本最終傳出的結構
+    #     "summary_data": percentage_series,# 這是 PR 值
+    #     "formative_data": formative_analysis# 這是 Z-Score 轉換分 + 一致性
+    # }
+    return {
+    "summary_profile": summary_profile,      # 原始值 + level 標籤（新加的）
+    "formative_profile": formative_profile,  # intent score + consistency（新加的）
+    "speed_trend": {                         # 三段趨勢（新加的）
+        "early_avg_speed": early_avg,
+        "mid_avg_speed":   mid_avg,
+        "late_avg_speed":  late_avg,
+        "trend": "declining" if late_avg < early_avg * 0.85 else
+                 ("improving" if late_avg > early_avg * 1.1 else "stable")
+    },
+    "summary_data": percentage_series,       # 原本的 PR 值，保留給其他地方用
+    "formative_data": formative_analysis     # 原本的 Z-score 分，保留給其他地方用
+}
     
 #  呼叫 GPT API 判斷風
 
@@ -1008,10 +1066,12 @@ def generate_round_summary_and_voice(file_path, style):
         voice_model = 'ja-JP-NanamiNeural'
 
     # 內建 3 次迭代的 Self-Refine Prompt
+    #原本用Round data: {json.dumps(gpt_features, indent=2)} 當作data輸入
     prompt = f"""
     You are an expert technical boxing coach analyzing a user's 30-second round.
     Target style: {style}.
-    Round data: {json.dumps(gpt_features, indent=2)}
+    
+    Performance data:{json.dumps(gpt_features, indent=2, ensure_ascii=False)}
 
     You MUST output your exact iterative thinking process using the specific XML tags below. Do not skip any steps.
 

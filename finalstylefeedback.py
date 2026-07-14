@@ -677,7 +677,7 @@ def ask_gpt_for_style(structured_data):
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.3, #
+                temperature=0.5, #
                 max_output_tokens=100,
             )
         )

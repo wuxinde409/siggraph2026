@@ -156,6 +156,10 @@ def load_all_json_files():
     max_values = boxing_df[json_columns].apply(max)
     print(f"[完成] 共 {len(boxing_df)} 筆有效資料")
     print(f"max_values:\n{max_values}")
+    print(f"mean_values:\n{boxing_df[json_columns].mean().round(4)}")
+    print(f"median_values:\n{boxing_df[json_columns].median().round(4)}")
+    print(f"std_values:\n{boxing_df[json_columns].std().round(4)}")
+    print(f"總筆數: {len(boxing_df)}")
 # def load_all_json_files():
 #     global boxing_df
 #     global max_values
