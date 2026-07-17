@@ -592,7 +592,7 @@ def prepare_data_for_gpt(file_path): #第二種把資料分開的
                 global_mean = global_col.mean()
                 global_std = global_col.std()
             else:
-                global_mean = user_mean # 防呆: 如果沒歷史資料，Z-score 就會是 0
+                global_mean = user_mean # 如果沒歷史資料，Z-score 就會是 0
                 global_std = 1
             
             # 3. 計算 Z-Score (這就是他在全體中的強度定位)
@@ -670,7 +670,7 @@ def prepare_data_for_gpt(file_path): #第二種把資料分開的
     "formative_data": formative_analysis     # 原本的 Z-score 分，保留給其他地方用
 }
     
-#  呼叫 GPT API 判斷風
+#  呼叫 GPT API 判斷風格
 
 def ask_gpt_for_style(structured_data):
 
@@ -678,7 +678,7 @@ def ask_gpt_for_style(structured_data):
         Act as an expert boxing coach and data analyst. Determine the user's 'boxing style' by analyzing the correlation between their results (Summary) and their sport movements (Formative).
 
         Input Data:
-        {json.dumps(structured_data, indent=2)}
+        {json.dumps(structured_data, indent=2 )}
 
         Archetype Definitions & Indicators:
 
@@ -1094,7 +1094,7 @@ def generate_round_summary_and_voice(file_path, style):
     <FINAL_SCRIPT>
     [Provide the final spoken script here, based on the refinements from ITERATION_2 and CRITIQUE_2.]
     {prompt_lang_instruction}
-    MUST be under 100 words. NO markdown, NO emojis.
+    MUST be under 50 words. NO markdown, NO emojis.
     </FINAL_SCRIPT>
     """
     
